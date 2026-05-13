@@ -40,7 +40,7 @@ export class FeishuAcpBridge {
       showThoughts: this.config.agent.showThoughts,
       log: this.log,
       onReply: (messageId, chatId, text) => this.sendReply(messageId, chatId, text),
-      onTyping: (messageId) => this.feishuClient.addReaction(messageId, "THUMBSUP"),
+      onTyping: (messageId) => this.feishuClient.addReaction(messageId, "THINKING"),
     });
     this.sessionManager.start();
 
