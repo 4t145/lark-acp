@@ -48,7 +48,7 @@ export class FeishuClient {
   }
 
   /** Add an emoji reaction to a message (best-effort, used as typing indicator). */
-  async addReaction(messageId: string, emoji = "Typing"): Promise<void> {
+  async addReaction(messageId: string, emoji = "THINKING"): Promise<void> {
     try {
       await this.client.im.messageReaction.create({
         path: { message_id: messageId },
