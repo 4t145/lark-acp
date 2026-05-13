@@ -1,6 +1,6 @@
 # lark-acp
 
-[![npm](https://img.shields.io/npm/v/lark-acp)](https://www.npmjs.com/package/lark-acp)
+[![npm](https://img.shields.io/npm/v/feishu-acp)](https://www.npmjs.com/package/feishu-acp)
 
 Use AI coding agents (Copilot, Claude, Codex, Gemini…) directly from Feishu/Lark — no server, no webhook, runs on your machine.
 
@@ -21,7 +21,7 @@ No public endpoint needed. The bridge runs locally and connects out.
 ## Quick Start
 
 ```bash
-npx lark-acp --agent copilot
+npx feishu-acp --agent copilot
 ```
 
 First run opens an interactive setup to create or connect your Feishu bot.
@@ -79,6 +79,10 @@ npm run build          # compile TypeScript → dist/
 npm run dev            # watch mode
 node dist/bin/lark-acp.js --agent copilot
 ```
+
+## Acknowledgements
+
+Inspired by [wechat-acp](https://github.com/formulahendry/wechat-acp) — the original project that bridges WeChat to ACP agents. lark-acp brings the same idea to Feishu/Lark.
 
 ## License
 

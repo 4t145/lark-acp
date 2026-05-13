@@ -1,5 +1,5 @@
 {
-  "name": "lark-acp",
+  "name": "feishu-acp",
   "version": "0.1.0",
   "description": "Bridge Feishu/Lark to any ACP-compatible AI agent",
   "type": "module",
