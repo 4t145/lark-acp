@@ -30,6 +30,7 @@ export async function spawnAgent(opts: SpawnAgentOpts): Promise<AgentProcessInfo
     cwd,
     env: { ...process.env, ...(env ?? {}) },
     stdio: ["pipe", "pipe", "pipe"],
+    shell: process.platform === "win32", // npx/npm not on PATH without shell on Windows
   });
 
   proc.stderr?.on("data", (chunk: Buffer) => {
