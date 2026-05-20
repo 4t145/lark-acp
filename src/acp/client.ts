@@ -1,17 +1,28 @@
 /**
  * ACP Client implementation for Feishu.
  *
- * Implements acp.Client: accumulates text chunks, auto-allows permissions,
- * provides filesystem read/write access for the agent.
+ * Implements acp.Client: accumulates text chunks, sends interactive cards
+ * for permission requests, provides filesystem read/write access for the agent.
  */
 
 import fs from "node:fs";
+import crypto from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
+
+/** Timeout for waiting on user's card action response before auto-allowing. */
+const PERMISSION_TIMEOUT_MS = 60_000;
+
+interface PendingPermission {
+  requestId: string;
+  resolve: (value: acp.RequestPermissionResponse) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
 
 export interface FeishuAcpClientOpts {
   onTyping: () => Promise<void>;
   onThought: (text: string) => Promise<void>;
   showThoughts: boolean;
+  sendInterruptCard: (messageId: string, params: acp.RequestPermissionRequest, requestId: string) => Promise<void>;
   log: (msg: string) => void;
 }
 
@@ -20,7 +31,11 @@ export class FeishuAcpClient implements acp.Client {
   private thoughtChunks: string[] = [];
   private opts: FeishuAcpClientOpts;
   private lastTypingAt = 0;
+  private currentMessageId = "";
   private static readonly TYPING_INTERVAL_MS = 5_000;
+
+  /** Tracks the single in-flight permission request (one per prompt turn). */
+  private pendingPermission: PendingPermission | null = null;
 
   constructor(opts: FeishuAcpClientOpts) {
     this.opts = opts;
@@ -30,11 +45,64 @@ export class FeishuAcpClient implements acp.Client {
     this.opts = { ...this.opts, ...cbs };
   }
 
+  /** Store the current message context so requestPermission knows where to send the card. */
+  setContext(messageId: string): void {
+    this.currentMessageId = messageId;
+  }
+
   async requestPermission(params: acp.RequestPermissionRequest): Promise<acp.RequestPermissionResponse> {
-    const allow = params.options.find((o) => o.kind === "allow_once" || o.kind === "allow_always");
-    const optionId = allow?.optionId ?? params.options[0]?.optionId ?? "allow";
-    this.opts.log(`[permission] auto-allow: ${params.toolCall?.title ?? "unknown"}`);
-    return { outcome: { outcome: "selected", optionId } };
+    const prvAllow = params.options.find((o) => o.kind === "allow_once" || o.kind === "allow_always");
+    const defaultOptionId = prvAllow?.optionId ?? params.options[0]?.optionId ?? "allow";
+
+    if (!this.currentMessageId) {
+      this.opts.log(`[permission] no message context, auto-allow: ${params.toolCall?.title ?? "unknown"}`);
+      return { outcome: { outcome: "selected", optionId: defaultOptionId } };
+    }
+
+    const requestId = crypto.randomUUID();
+
+    return new Promise<acp.RequestPermissionResponse>((resolve) => {
+      const timer = setTimeout(() => {
+        this.opts.log(`[permission] timeout, auto-allow: ${params.toolCall?.title ?? "unknown"}`);
+        if (this.pendingPermission?.requestId === requestId) {
+          this.pendingPermission = null;
+        }
+        resolve({ outcome: { outcome: "selected", optionId: defaultOptionId } });
+      }, PERMISSION_TIMEOUT_MS);
+
+      this.pendingPermission = { requestId, resolve, timer };
+
+      this.opts.sendInterruptCard(this.currentMessageId, params, requestId).catch((err) => {
+        this.opts.log(`[permission] failed to send card: ${String(err)}`);
+        // Fall back to auto-allow on send failure
+        clearTimeout(timer);
+        if (this.pendingPermission?.requestId === requestId) {
+          this.pendingPermission = null;
+        }
+        resolve({ outcome: { outcome: "selected", optionId: defaultOptionId } });
+      });
+    });
+  }
+
+  /** Resolve a pending permission request from a card action event. */
+  handleCardAction(requestId: string, optionId: string): boolean {
+    const pp = this.pendingPermission;
+    if (!pp || pp.requestId !== requestId) return false;
+
+    clearTimeout(pp.timer);
+    this.pendingPermission = null;
+    pp.resolve({ outcome: { outcome: "selected", optionId } });
+    return true;
+  }
+
+  /** Cancel any pending permission request (e.g. on /cancel). Resolves with cancelled outcome. */
+  cancelPendingPermission(): void {
+    const pp = this.pendingPermission;
+    if (!pp) return;
+
+    clearTimeout(pp.timer);
+    this.pendingPermission = null;
+    pp.resolve({ outcome: { outcome: "cancelled" } });
   }
 
   async sessionUpdate(params: acp.SessionNotification): Promise<void> {

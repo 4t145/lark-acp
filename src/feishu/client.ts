@@ -1,9 +1,13 @@
 /**
  * Feishu HTTP client — thin wrapper around @larksuite/node-sdk Client.
- * Handles sending messages and reactions.
+ * Handles sending messages, reactions, and interactive cards.
  */
 
 import * as Lark from "@larksuiteoapi/node-sdk";
+import type * as acp from "@agentclientprotocol/sdk";
+
+/** Maximum time a permission card stays active before auto-closing. */
+const PERMISSION_TIMEOUT_SEC = 60;
 
 /** Wrap text in a Feishu interactive card with a markdown element. */
 function buildMarkdownCard(text: string): object {
@@ -11,6 +15,43 @@ function buildMarkdownCard(text: string): object {
     config: { wide_screen_mode: true },
     elements: [
       { tag: "markdown", content: text },
+    ],
+  };
+}
+
+/** Map ACP permission option kind to button style. */
+function buttonTypeForKind(kind: string): "primary" | "danger" | "default" {
+  if (kind === "allow_once") return "primary";
+  if (kind === "reject_once" || kind === "reject_always") return "danger";
+  return "default";
+}
+
+/** Build a permission request interactive card with action buttons. */
+function buildPermissionCard(params: acp.RequestPermissionRequest, requestId: string): object {
+  const toolTitle = params.toolCall?.title ?? "unknown";
+  const toolKind = params.toolCall?.kind ?? "tool";
+
+  const header = {
+    title: { tag: "plain_text" as const, content: "Agent 需要确认" },
+    template: "blue" as const,
+  };
+
+  const actions: Lark.InteractiveCardActionItem[] = params.options.map((opt) => ({
+    tag: "button" as const,
+    text: { tag: "plain_text" as const, content: opt.name },
+    type: buttonTypeForKind(opt.kind),
+    value: { r: requestId, o: opt.optionId },
+  }));
+
+  return {
+    config: { wide_screen_mode: true },
+    header,
+    elements: [
+      {
+        tag: "markdown",
+        content: `**${toolKind}**: ${toolTitle}\n\n${params.options.length} 个选项，请在 ${PERMISSION_TIMEOUT_SEC}s 内选择`,
+      },
+      { tag: "action" as const, actions },
     ],
   };
 }
@@ -96,5 +137,22 @@ export class FeishuClient {
     } catch {
       // best-effort
     }
+  }
+
+  /** Send an interactive permission card as a reply to the original message. */
+  async sendInterruptCard(
+    messageId: string,
+    params: acp.RequestPermissionRequest,
+    requestId: string,
+  ): Promise<void> {
+    const card = buildPermissionCard(params, requestId);
+    await this.client.im.message.reply({
+      path: { message_id: messageId },
+      data: {
+        content: JSON.stringify(card),
+        msg_type: "interactive",
+        reply_in_thread: false,
+      },
+    });
   }
 }

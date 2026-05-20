@@ -10,6 +10,7 @@ export interface FeishuWsOpts {
   appId: string;
   appSecret: string;
   onMessage: (event: FeishuMessageEvent) => void;
+  onCardAction: (event: Lark.CardActionEvent) => void;
   log: (msg: string) => void;
 }
 
@@ -34,6 +35,16 @@ export class FeishuWsConnection {
           this.opts.onMessage(event);
         } catch (err) {
           this.opts.log(`[ws] error handling message event: ${String(err)}`);
+        }
+      },
+      "card.action.trigger": async (data: Lark.RawCardActionEvent) => {
+        try {
+          const normalized = Lark.normalizeCardAction(data);
+          if (normalized) {
+            this.opts.onCardAction(normalized);
+          }
+        } catch (err) {
+          this.opts.log(`[ws] error handling card action: ${String(err)}`);
         }
       },
     });

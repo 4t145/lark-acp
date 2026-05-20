@@ -38,6 +38,7 @@ export interface SessionManagerOpts {
   onReply: (messageId: string, chatId: string, text: string) => Promise<void>;
   onTyping: (messageId: string) => Promise<string | null>;
   onStopTyping: (messageId: string, reactionId: string) => Promise<void>;
+  sendInterruptCard: (messageId: string, params: acp.RequestPermissionRequest, requestId: string) => Promise<void>;
 }
 
 /** Maps agent presets to auth remediation hints. */
@@ -99,6 +100,34 @@ export class SessionManager {
     return this.sessions.size;
   }
 
+  /** Cancel the current agent prompt and clear the queue for a user. */
+  async cancelSession(userId: string): Promise<void> {
+    const session = this.sessions.get(userId);
+    if (!session) return;
+
+    this.opts.log(`[${userId}] Cancelling current task`);
+
+    // Cancel any in-flight permission request first (so requestPermission returns)
+    session.client.cancelPendingPermission();
+
+    // Notify the agent to cancel
+    try {
+      await session.agentInfo.connection.cancel({ sessionId: session.agentInfo.sessionId });
+    } catch (err) {
+      this.opts.log(`[${userId}] cancel notification error: ${String(err)}`);
+    }
+
+    // Clear remaining messages in queue
+    session.queue.length = 0;
+  }
+
+  /** Handle a card action event — resolve the pending permission request. */
+  handleCardAction(openId: string, requestId: string, optionId: string): boolean {
+    const session = this.sessions.get(openId);
+    if (!session) return false;
+    return session.client.handleCardAction(requestId, optionId);
+  }
+
   private async createSession(userId: string, firstMessage: PendingMessage): Promise<UserSession> {
     this.opts.log(`Creating session for user ${userId}`);
 
@@ -106,6 +135,7 @@ export class SessionManager {
       onTyping: () => this.opts.onTyping(firstMessage.messageId).then(() => {}),
       onThought: (text) => this.opts.onReply(firstMessage.messageId, firstMessage.chatId, text),
       showThoughts: this.opts.showThoughts,
+      sendInterruptCard: this.opts.sendInterruptCard,
       log: (msg) => this.opts.log(`[${userId}] ${msg}`),
     });
 
@@ -171,6 +201,9 @@ export class SessionManager {
         });
 
         await session.client.flush(); // reset buffers
+
+        // Set current message context for permission card routing
+        session.client.setContext(pending.messageId);
 
         try {
           const reactionId = await this.opts.onTyping(pending.messageId).catch(() => null);

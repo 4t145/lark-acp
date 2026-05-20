@@ -5,6 +5,7 @@
  * One bridge = one Feishu bot app → many users → many agent sessions.
  */
 
+import * as Lark from "@larksuiteoapi/node-sdk";
 import { FeishuClient } from "./feishu/client.js";
 import { FeishuWsConnection } from "./feishu/websocket.js";
 import type { FeishuMessageEvent } from "./feishu/types.js";
@@ -12,6 +13,9 @@ import { SessionManager } from "./acp/session.js";
 import { feishuMessageToPrompt } from "./adapter/inbound.js";
 import { formatForFeishu, splitText } from "./adapter/outbound.js";
 import type { FeishuAcpConfig } from "./config.js";
+
+/** Text triggers that instruct the bridge to cancel the current agent task. */
+const CANCEL_COMMANDS = new Set(["/cancel", "取消", "/stop", "停止"]);
 
 export class FeishuAcpBridge {
   private config: FeishuAcpConfig;
@@ -43,6 +47,8 @@ export class FeishuAcpBridge {
       onReply: (messageId, chatId, text) => this.sendReply(messageId, chatId, text),
       onTyping: (messageId) => this.feishuClient.addReaction(messageId, "THINKING"),
       onStopTyping: (messageId, reactionId) => this.feishuClient.removeReaction(messageId, reactionId),
+      sendInterruptCard: (messageId, params, requestId) =>
+        this.feishuClient.sendInterruptCard(messageId, params, requestId),
     });
     this.sessionManager.start();
 
@@ -50,6 +56,7 @@ export class FeishuAcpBridge {
       appId: this.config.feishu.appId,
       appSecret: this.config.feishu.appSecret,
       onMessage: (event) => this.handleMessage(event),
+      onCardAction: (event) => this.handleCardAction(event),
       log: this.log,
     });
     ws.start();
@@ -75,22 +82,48 @@ export class FeishuAcpBridge {
 
     this.log(`Message from ${userId} in chat ${chatId}: [${message.message_type}]`);
 
-    // Convert and enqueue — fire-and-forget
-    this.enqueue(event, userId, messageId, chatId).catch((err) => {
+    const prompt = feishuMessageToPrompt(event);
+    if (!prompt.length) return;
+
+    // Check for cancel command before enqueuing
+    const firstBlock = prompt[0];
+    if (firstBlock.type === "text") {
+      const text = firstBlock.text.trim();
+      if (CANCEL_COMMANDS.has(text)) {
+        this.log(`Cancel command from ${userId}`);
+        this.sessionManager?.cancelSession(userId)
+          .then(() => this.feishuClient.replyText(messageId, "已取消当前任务"))
+          .catch((err) => this.log(`Cancel error: ${String(err)}`));
+        return;
+      }
+    }
+
+    this.enqueue(userId, messageId, chatId, prompt).catch((err) => {
       this.log(`Failed to enqueue message: ${String(err)}`);
     });
   }
 
   private async enqueue(
-    event: FeishuMessageEvent,
     userId: string,
     messageId: string,
     chatId: string,
+    prompt: ReturnType<typeof feishuMessageToPrompt>,
   ): Promise<void> {
-    const prompt = feishuMessageToPrompt(event);
-    if (!prompt.length) return; // empty message, skip
-
     await this.sessionManager!.enqueue(userId, { prompt, messageId, chatId });
+  }
+
+  private handleCardAction(event: Lark.CardActionEvent): void {
+    const value = event.action.value as { r?: string; o?: string } | undefined;
+    if (!value?.r || !value?.o) return;
+
+    const openId = event.operator.openId;
+    const handled = this.sessionManager?.handleCardAction(openId, value.r, value.o) ?? false;
+
+    if (handled) {
+      this.log(`Card action resolved: user=${openId} option=${value.o}`);
+    } else {
+      this.log(`Card action ignored: user=${openId}, no matching pending permission`);
+    }
   }
 
   private async sendReply(messageId: string, chatId: string, text: string): Promise<void> {
