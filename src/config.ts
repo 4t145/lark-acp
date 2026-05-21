@@ -1,10 +1,10 @@
 /**
- * Configuration types, defaults, and persistence for lark-acp.
+ * Built-in ACP agent presets and lookup helpers.
+ *
+ * Pure data; no IO. The library itself never reads these — they exist
+ * for callers (CLIs, embedding apps) that want a curated list of known
+ * agents to expose in their UI.
  */
-
-import fs from "node:fs";
-import path from "node:path";
-import os from "node:os";
 
 export interface AgentPreset {
   label: string;
@@ -12,30 +12,6 @@ export interface AgentPreset {
   args: string[];
   description?: string;
   env?: Record<string, string>;
-}
-
-export interface FeishuAcpConfig {
-  feishu: {
-    appId: string;
-    appSecret: string;
-  };
-  agent: {
-    preset?: string;
-    command: string;
-    args: string[];
-    cwd: string;
-    env?: Record<string, string>;
-    showThoughts: boolean;
-  };
-  session: {
-    idleTimeoutMs: number;
-    maxConcurrentUsers: number;
-  };
-  storage: {
-    backend: "file" | "postgres";
-    dir: string;
-    url?: string;
-  };
 }
 
 export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
@@ -71,80 +47,37 @@ export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
   },
 };
 
-export function defaultStorageDir(): string {
-  return path.join(os.homedir(), ".lark-acp");
-}
-
-export function defaultConfig(): FeishuAcpConfig {
-  return {
-    feishu: { appId: "", appSecret: "" },
-    agent: {
-      preset: undefined,
-      command: "",
-      args: [],
-      cwd: process.cwd(),
-      showThoughts: true,
-    },
-    session: {
-      idleTimeoutMs: 1440 * 60_000, // 24h
-      maxConcurrentUsers: 10,
-    },
-    storage: { backend: "file", dir: defaultStorageDir() },
-  };
-}
-
-export function configFilePath(storageDir: string): string {
-  return path.join(storageDir, "config.json");
-}
-
-export function larkChannelConfigPath(): string {
-  return path.join(os.homedir(), ".lark-channel", "config.json");
+export interface ResolvedAgent {
+  id?: string;
+  label?: string;
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  source: "preset" | "raw";
 }
 
 /**
- * Try reading App ID / Secret from ~/.lark-channel/config.json
- * (written by `lark-cli config bind --source lark-channel`).
+ * Split a raw `"command arg1 arg2"` string into its parts.
+ *
+ * @throws when the input has no command token after trimming.
  */
-export function loadLarkChannelConfig(): { appId: string; appSecret: string } | null {
-  try {
-    const raw = fs.readFileSync(larkChannelConfigPath(), "utf-8");
-    const cfg = JSON.parse(raw) as {
-      accounts?: { app?: { id?: string; secret?: string } };
-    };
-    const id = cfg.accounts?.app?.id;
-    const secret = cfg.accounts?.app?.secret;
-    if (id && secret) return { appId: id, appSecret: secret };
-  } catch {
-    // file not present or malformed
-  }
-  return null;
-}
-
-export function loadSavedConfig(storageDir: string): Partial<FeishuAcpConfig> | null {
-  const file = configFilePath(storageDir);
-  if (!fs.existsSync(file)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf-8")) as Partial<FeishuAcpConfig>;
-  } catch {
-    return null;
-  }
-}
-
-export function saveConfig(storageDir: string, config: Partial<FeishuAcpConfig>): void {
-  fs.mkdirSync(storageDir, { recursive: true });
-  fs.writeFileSync(configFilePath(storageDir), JSON.stringify(config, null, 2), "utf-8");
-}
-
 export function parseAgentCommand(agentStr: string): { command: string; args: string[] } {
   const parts = agentStr.trim().split(/\s+/);
   if (!parts[0]) throw new Error("Agent command cannot be empty");
   return { command: parts[0], args: parts.slice(1) };
 }
 
+/**
+ * Resolve a user-provided agent selection against the preset registry.
+ * Falls back to parsing the input as a raw command string.
+ *
+ * @throws when the selection is not a preset and parsing it as a raw
+ *         command yields no command token.
+ */
 export function resolveAgent(
   agentSelection: string,
-  registry = BUILT_IN_AGENTS,
-): { id?: string; label?: string; command: string; args: string[]; env?: Record<string, string>; source: "preset" | "raw" } {
+  registry: Record<string, AgentPreset> = BUILT_IN_AGENTS,
+): ResolvedAgent {
   const preset = registry[agentSelection];
   if (preset) {
     return {

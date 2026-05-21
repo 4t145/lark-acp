@@ -1,26 +1,27 @@
-/**
- * FileStorageBackend — JSON file storage for session records.
- * Auto-migrates from legacy { userId: { sessionId, cwd, updatedAt } } format.
- */
-
 import fs from "node:fs";
 import path from "node:path";
-import type { SessionRecord, StorageBackend } from "./types.js";
+import type { SessionRecord, SessionStore } from "./session-store.js";
 
-/** Legacy format: { [userId]: { sessionId, cwd, updatedAt } } */
+const SESSIONS_FILE_NAME = "sessions.json";
+
+/** Pre-multi-session legacy on-disk shape. */
 interface LegacyRecord {
   sessionId: string;
   cwd: string;
   updatedAt: number;
 }
 
-export class FileStorageBackend implements StorageBackend {
-  private filePath: string;
-  private data: Map<string, SessionRecord[]> = new Map();
-  private pending = false;
+/**
+ * JSON-file backed {@link SessionStore}. Writes are coalesced via
+ * `setImmediate` so a burst of `save()` calls produces one fsync.
+ */
+export class FileSessionStore implements SessionStore {
+  private readonly filePath: string;
+  private readonly data = new Map<string, SessionRecord[]>();
+  private flushScheduled = false;
 
   constructor(storageDir: string) {
-    this.filePath = path.join(storageDir, "sessions.json");
+    this.filePath = path.join(storageDir, SESSIONS_FILE_NAME);
   }
 
   async init(): Promise<void> {
@@ -32,6 +33,7 @@ export class FileStorageBackend implements StorageBackend {
       const raw = fs.readFileSync(this.filePath, "utf-8");
       parsed = JSON.parse(raw);
     } catch {
+      // Corrupt file — treat as empty rather than crashing.
       return;
     }
 
@@ -40,29 +42,33 @@ export class FileStorageBackend implements StorageBackend {
     const record = parsed as Record<string, unknown>;
     const firstValue = Object.values(record)[0];
 
-    // Detect legacy format: values are { sessionId, cwd, updatedAt }
-    const isLegacy = firstValue && typeof firstValue === "object" &&
-      "sessionId" in (firstValue as Record<string, unknown>) && !("chatId" in (firstValue as Record<string, unknown>));
+    const isLegacy =
+      firstValue !== undefined &&
+      typeof firstValue === "object" &&
+      firstValue !== null &&
+      "sessionId" in (firstValue as Record<string, unknown>) &&
+      !("chatId" in (firstValue as Record<string, unknown>));
 
     if (isLegacy) {
       this.migrateLegacy(record as Record<string, LegacyRecord>);
-    } else {
-      // New format: values are SessionRecord[]
-      for (const [chatId, entries] of Object.entries(record)) {
-        if (Array.isArray(entries)) {
-          this.data.set(chatId, entries as SessionRecord[]);
-        }
+      return;
+    }
+
+    for (const [chatId, entries] of Object.entries(record)) {
+      if (Array.isArray(entries)) {
+        this.data.set(chatId, entries as SessionRecord[]);
       }
     }
   }
 
   async close(): Promise<void> {
-    // no-op
+    // No persistent handles — writes are synchronous.
   }
 
-  async listByChat(chatId: string): Promise<SessionRecord[]> {
-    const records = this.data.get(chatId) ?? [];
-    return records.sort((a, b) => b.updatedAt - a.updatedAt);
+  async listByChat(chatId: string): Promise<readonly SessionRecord[]> {
+    const records = this.data.get(chatId);
+    if (!records) return [];
+    return [...records].sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   async getLatest(chatId: string): Promise<SessionRecord | null> {
@@ -80,26 +86,24 @@ export class FileStorageBackend implements StorageBackend {
     const idx = records.findIndex((r) => r.sessionId === record.sessionId);
     if (idx >= 0) records[idx] = record;
     else records.push(record);
-    this.flush();
+    this.scheduleFlush();
   }
 
   async delete(chatId: string, sessionId: string): Promise<void> {
     const records = this.data.get(chatId);
     if (!records) return;
     const idx = records.findIndex((r) => r.sessionId === sessionId);
-    if (idx >= 0) {
-      records.splice(idx, 1);
-      if (!records.length) this.data.delete(chatId);
-      this.flush();
-    }
+    if (idx < 0) return;
+    records.splice(idx, 1);
+    if (!records.length) this.data.delete(chatId);
+    this.scheduleFlush();
   }
 
-  private flush(): void {
-    if (this.pending) return;
-    this.pending = true;
-    // De-duplicate rapid writes
+  private scheduleFlush(): void {
+    if (this.flushScheduled) return;
+    this.flushScheduled = true;
     setImmediate(() => {
-      this.pending = false;
+      this.flushScheduled = false;
       const obj: Record<string, SessionRecord[]> = {};
       for (const [chatId, records] of this.data) {
         obj[chatId] = records;
@@ -110,18 +114,18 @@ export class FileStorageBackend implements StorageBackend {
 
   private migrateLegacy(legacy: Record<string, LegacyRecord>): void {
     for (const [oldKey, val] of Object.entries(legacy)) {
-      // Use the old key as chatId — best approximation for migration
-      const record: SessionRecord = {
-        chatId: oldKey,
-        sessionId: val.sessionId,
-        agentCommand: "",
-        agentArgs: [],
-        cwd: val.cwd,
-        createdAt: val.updatedAt,
-        updatedAt: val.updatedAt,
-      };
-      this.data.set(oldKey, [record]);
+      this.data.set(oldKey, [
+        {
+          chatId: oldKey,
+          sessionId: val.sessionId,
+          agentCommand: "",
+          agentArgs: [],
+          cwd: val.cwd,
+          createdAt: val.updatedAt,
+          updatedAt: val.updatedAt,
+        },
+      ]);
     }
-    this.flush();
+    this.scheduleFlush();
   }
 }
