@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
+import type { ToolItem } from "../feishu/client.js";
 
 interface PendingPermission {
   requestId: string;
@@ -21,8 +22,8 @@ export interface FeishuAcpClientOpts {
   sendInterruptCard: (messageId: string, params: acp.RequestPermissionRequest, requestId: string, chatId: string) => Promise<void>;
   sendThinkingCard: (replyToMessageId: string) => Promise<string | null>;
   updateThinkingCard: (cardMessageId: string, thoughtText: string, isDone: boolean) => Promise<void>;
-  sendToolCard: (replyToMessageId: string, title: string, kind: string) => Promise<string | null>;
-  updateToolCard: (cardMessageId: string, title: string, kind: string, diffText?: string, isFailed?: boolean) => Promise<void>;
+  sendActivityCard: (replyToMessageId: string, items: ToolItem[]) => Promise<string | null>;
+  updateActivityCard: (cardMessageId: string, items: ToolItem[]) => Promise<void>;
   log: (msg: string) => void;
 }
 
@@ -44,8 +45,10 @@ export class FeishuAcpClient implements acp.Client {
   /** Prevents concurrent thinking card creation (race condition guard). */
   private thinkingCardCreating: Promise<string | null> | null = null;
 
-  /** Maps toolCallId → card info for tool card updates (caches title/kind from initial call). */
-  private toolCards: Map<string, { cardId: string; title: string; kind: string }> = new Map();
+  /** Unified activity card — tracks all tool items in this prompt turn. */
+  private activityCardId: string | null = null;
+  private toolItems: ToolItem[] = [];
+  private toolCallIds: string[] = [];
 
   constructor(opts: FeishuAcpClientOpts) {
     this.opts = opts;
@@ -133,10 +136,10 @@ export class FeishuAcpClient implements acp.Client {
         const title = u.title ?? "unknown";
         const kind = u.kind ?? "tool";
         const toolCallId = (u as Record<string, unknown>).toolCallId as string | undefined;
-        this.opts.log(`[event] tool_call id=${toolCallId ?? "?"} title="${title}" kind=${kind} status=${u.status}`);
-        this.sendToolCardIfNeeded(title, kind, toolCallId).catch((err) => {
-          this.opts.log(`[tool-card] create failed: ${String(err)}`);
-        });
+        const status = (u.status ?? "in_progress") as ToolItem["status"];
+        this.opts.log(`[event] tool_call id=${toolCallId ?? "?"} title="${title}" kind=${kind} status=${status}`);
+        this.upsertToolItem(toolCallId, title, kind, status);
+        this.refreshActivityCard().catch(() => {});
         await this.maybeSendTyping();
         break;
       }
@@ -145,7 +148,6 @@ export class FeishuAcpClient implements acp.Client {
         const toolCallId = (u as Record<string, unknown>).toolCallId as string;
         this.opts.log(`[event] tool_call_update id=${toolCallId} status=${u.status}`);
         if (u.status === "completed" || u.status === "failed") {
-          const title = u.title ?? "unknown";
           const kind = u.kind ?? "tool";
           let diffText: string | undefined;
           if (u.content) {
@@ -160,9 +162,9 @@ export class FeishuAcpClient implements acp.Client {
               }
             }
           }
-          this.updateToolCardIfExists(toolCallId, title, kind, diffText, u.status === "failed").catch((err) => {
-            this.opts.log(`[tool-card] update failed: ${String(err)}`);
-          });
+          const status = u.status as ToolItem["status"];
+          this.upsertToolItem(toolCallId, u.title ?? "unknown", kind, status);
+          this.refreshActivityCard().catch(() => {});
         }
         break;
       }
@@ -228,39 +230,43 @@ export class FeishuAcpClient implements acp.Client {
     });
   }
 
-  private async sendToolCardIfNeeded(title: string, kind: string, toolCallId?: string): Promise<void> {
-    if (!this.currentMessageId) {
-      this.opts.log(`[tool-card] skip: no currentMessageId`);
-      return;
-    }
-    this.opts.log(`[tool-card] creating for id=${toolCallId ?? "?"} title="${title}"`);
-    const id = await this.opts.sendToolCard(this.currentMessageId, title, kind);
-    if (id && toolCallId) {
-      this.toolCards.set(toolCallId, { cardId: id, title, kind });
-      this.opts.log(`[tool-card] created id=${id} toolCallId=${toolCallId}`);
+  private upsertToolItem(
+    toolCallId: string | undefined,
+    title: string,
+    kind: string,
+    status: ToolItem["status"],
+  ): void {
+    const key = toolCallId ?? `${kind}:${title}`;
+    // Replace or append
+    const idx = this.toolItems.findIndex((item, i) => {
+      if (toolCallId && toolCallId === this.toolCallIds[i]) return true;
+      return item.title === title && item.kind === kind && status !== "failed"; // don't match failed items
+    });
+    if (idx >= 0) {
+      this.toolItems[idx] = { title, kind, status };
+      if (toolCallId) this.toolCallIds[idx] = toolCallId;
     } else {
-      this.opts.log(`[tool-card] create returned null or no toolCallId (id=${id})`);
+      this.toolItems.push({ title, kind, status });
+      this.toolCallIds.push(toolCallId ?? "");
     }
   }
 
-  private async updateToolCardIfExists(
-    toolCallId: string,
-    title: string,
-    kind: string,
-    diffText?: string,
-    isFailed?: boolean,
-  ): Promise<void> {
-    const entry = this.toolCards.get(toolCallId);
-    if (!entry) {
-      this.opts.log(`[tool-card] update skipped: no cached entry for toolCallId=${toolCallId}`);
+  private async refreshActivityCard(): Promise<void> {
+    if (!this.currentMessageId) return;
+
+    if (!this.activityCardId) {
+      const id = await this.opts.sendActivityCard(this.currentMessageId, this.toolItems);
+      if (id) {
+        this.activityCardId = id;
+        this.opts.log(`[activity-card] created id=${id} items=${this.toolItems.length}`);
+      } else {
+        this.opts.log(`[activity-card] create returned null`);
+      }
       return;
     }
-    this.toolCards.delete(toolCallId);
-    const finalTitle = title !== "unknown" ? title : entry.title;
-    const finalKind = kind !== "tool" ? kind : entry.kind;
-    this.opts.log(`[tool-card] updating id=${entry.cardId} toolCallId=${toolCallId} title="${finalTitle}" failed=${isFailed ?? false} diff=${diffText ? "yes" : "no"}`);
-    await this.opts.updateToolCard(entry.cardId, finalTitle, finalKind, diffText, isFailed).catch((err) => {
-      this.opts.log(`[tool-card] update API failed: ${String(err)}`);
+    this.opts.log(`[activity-card] updating id=${this.activityCardId} items=${this.toolItems.length}`);
+    await this.opts.updateActivityCard(this.activityCardId, this.toolItems).catch((err) => {
+      this.opts.log(`[activity-card] update failed: ${String(err)}`);
     });
   }
 

@@ -50,10 +50,10 @@ export class FeishuAcpBridge {
         this.feishuClient.sendThinkingCard(replyToMessageId),
       updateThinkingCard: (cardMessageId, thoughtText, isDone) =>
         this.feishuClient.updateThinkingCard(cardMessageId, thoughtText, isDone),
-      sendToolCard: (replyToMessageId, title, kind) =>
-        this.feishuClient.sendToolCard(replyToMessageId, title, kind),
-      updateToolCard: (cardMessageId, title, kind, diffText, isFailed) =>
-        this.feishuClient.updateToolCard(cardMessageId, title, kind, diffText, isFailed),
+      sendActivityCard: (replyToMessageId, items) =>
+        this.feishuClient.sendActivityCard(replyToMessageId, items),
+      updateActivityCard: (cardMessageId, items) =>
+        this.feishuClient.updateActivityCard(cardMessageId, items),
     });
   }
 
@@ -89,6 +89,32 @@ export class FeishuAcpBridge {
 
     this.log(`Message from ${userId} in chat ${chatId}: [${message.message_type}]`);
 
+    // Check and enqueue asynchronously (needs bot openId for @mention filter)
+    this.checkAndEnqueue(event, chatId, userId, messageId).catch((err) => {
+      this.log(`Failed to enqueue message: ${String(err)}`);
+    });
+  }
+
+  private async checkAndEnqueue(
+    event: FeishuMessageEvent,
+    chatId: string,
+    userId: string,
+    messageId: string,
+  ): Promise<void> {
+    const { message } = event;
+
+    // In group chats, only forward messages that @mention the bot
+    if (message.chat_type === "group") {
+      const botOpenId = await this.feishuClient.getBotOpenId();
+      const mentioned = message.mentions?.some(
+        (m) => m.id?.open_id === botOpenId
+      );
+      if (!mentioned) {
+        this.log(`Skipping group message — bot not mentioned`);
+        return;
+      }
+    }
+
     const prompt = feishuMessageToPrompt(event);
     if (!prompt.length) return;
 
@@ -104,9 +130,7 @@ export class FeishuAcpBridge {
       }
     }
 
-    this.enqueueWithContext(chatId, userId, messageId, prompt, event).catch((err) => {
-      this.log(`Failed to enqueue message: ${String(err)}`);
-    });
+    await this.enqueueWithContext(chatId, userId, messageId, prompt, event);
   }
 
   private async enqueueWithContext(

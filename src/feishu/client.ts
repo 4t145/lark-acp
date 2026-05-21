@@ -97,61 +97,46 @@ function buildThinkingCard(text?: string, isDone?: boolean): object {
   };
 }
 
-/** Build a "tool running" card. */
-function buildToolCard(title: string, kind: string): object {
+/** Build a unified activity card with todo-list style tool tracking. */
+function buildActivityCard(items: ToolItem[]): object {
+  const lines: string[] = [];
+  for (const item of items) {
+    const mark = STATUS_MARKS[item.status] ?? STATUS_MARKS["pending"];
+    lines.push(`- ${mark} \`${item.title}\` (${item.kind})`);
+  }
   return {
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: "plain_text" as const, content: "🔧 运行工具" },
+      title: { tag: "plain_text" as const, content: "📋 Agent 工作中" },
       template: "blue" as const,
     },
-    elements: [
-      { tag: "markdown", content: `**${kind}**: \`${title}\`\n\n⏳ 执行中...` },
-    ],
+    elements: [{ tag: "markdown", content: lines.join("\n") || "准备中..." }],
   };
 }
 
-/** Build a "tool done" card, optionally with diff output. */
-function buildToolDoneCard(title: string, kind: string, diffText?: string): object {
-  let content = `**${kind}**: \`${title}\``;
-  if (diffText) {
-    content += `\n\n\`\`\`diff\n${diffText}\n\`\`\``;
-  }
-  return {
-    config: { wide_screen_mode: true },
-    header: {
-      title: { tag: "plain_text" as const, content: "✅ 工具完成" },
-      template: "green" as const,
-    },
-    elements: [{ tag: "markdown", content }],
-  };
-}
-
-/** Build a "tool failed" card, optionally with diff output. */
-function buildToolFailedCard(title: string, kind: string, diffText?: string): object {
-  let content = `**${kind}**: \`${title}\``;
-  if (diffText) {
-    content += `\n\n\`\`\`diff\n${diffText}\n\`\`\``;
-  }
-  return {
-    config: { wide_screen_mode: true },
-    header: {
-      title: { tag: "plain_text" as const, content: "❌ 工具失败" },
-      template: "red" as const,
-    },
-    elements: [{ tag: "markdown", content }],
-  };
-}
+const STATUS_MARKS: Record<ToolItem["status"], string> = {
+  pending:   "- [ ]",
+  in_progress: "[⏳]",
+  completed: "[✅]",
+  failed:    "[❌]",
+};
 
 export interface FeishuClientOpts {
   appId: string;
   appSecret: string;
 }
 
+export interface ToolItem {
+  title: string;
+  kind: string;
+  status: "pending" | "in_progress" | "completed" | "failed";
+}
+
 export class FeishuClient {
   private client: Lark.Client;
   private userNameCache = new Map<string, string>();
   private chatNameCache = new Map<string, string>();
+  private botOpenId: string | null = null;
 
   constructor(opts: FeishuClientOpts) {
     this.client = new Lark.Client({
@@ -161,6 +146,21 @@ export class FeishuClient {
       // Suppress internal SDK logs
       loggerLevel: Lark.LoggerLevel.error,
     });
+  }
+
+  /** Fetch cached bot open_id. */
+  async getBotOpenId(): Promise<string> {
+    if (this.botOpenId) return this.botOpenId;
+    try {
+      const res = await (this.client as any).request({
+        method: "GET",
+        url: "/open-apis/bot/v3/info",
+      });
+      this.botOpenId = (res?.bot?.open_id as string) ?? "";
+    } catch {
+      this.botOpenId = "";
+    }
+    return this.botOpenId ?? "";
   }
 
   /** Fetch and cache user display name by open_id. */
@@ -335,13 +335,13 @@ export class FeishuClient {
     }).catch(() => {});
   }
 
-  /** Create a "tool running" card as a reply. Returns the card's message_id. */
-  async sendToolCard(replyToMessageId: string, title: string, kind: string): Promise<string | null> {
+  /** Create the unified activity card. Returns the card's message_id. */
+  async sendActivityCard(replyToMessageId: string, items: ToolItem[]): Promise<string | null> {
     try {
       const res = await this.client.im.message.reply({
         path: { message_id: replyToMessageId },
         data: {
-          content: JSON.stringify(buildToolCard(title, kind)),
+          content: JSON.stringify(buildActivityCard(items)),
           msg_type: "interactive",
           reply_in_thread: false,
         },
@@ -352,14 +352,13 @@ export class FeishuClient {
     }
   }
 
-  /** Update a tool card with completion/failure status and optional diff output. */
-  async updateToolCard(cardMessageId: string, title: string, kind: string, diffText?: string, isFailed?: boolean): Promise<void> {
-    const card = isFailed ? buildToolFailedCard(title, kind, diffText) : buildToolDoneCard(title, kind, diffText);
+  /** Update the activity card with the latest tool items. */
+  async updateActivityCard(cardMessageId: string, items: ToolItem[]): Promise<void> {
     await (this.client as any).request({
       method: "PATCH",
       url: `/open-apis/im/v1/messages/${cardMessageId}`,
       data: {
-        content: JSON.stringify(card),
+        content: JSON.stringify(buildActivityCard(items)),
         msg_type: "interactive",
       },
     }).catch(() => {});

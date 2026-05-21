@@ -8,6 +8,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { FeishuAcpClient } from "./client.js";
 import { spawnAgent, spawnAndResumeAgent, killAgent, type AgentProcessInfo } from "./agent-manager.js";
 import type { StorageBackend } from "../storage/types.js";
+import type { ToolItem } from "../feishu/client.js";
 
 export interface PendingMessage {
   prompt: acp.ContentBlock[];
@@ -41,8 +42,8 @@ export interface SessionManagerOpts {
   sendInterruptCard: (messageId: string, params: acp.RequestPermissionRequest, requestId: string, chatId: string) => Promise<void>;
   sendThinkingCard: (replyToMessageId: string) => Promise<string | null>;
   updateThinkingCard: (cardMessageId: string, thoughtText: string, isDone: boolean) => Promise<void>;
-  sendToolCard: (replyToMessageId: string, title: string, kind: string) => Promise<string | null>;
-  updateToolCard: (cardMessageId: string, title: string, kind: string, diffText?: string, isFailed?: boolean) => Promise<void>;
+  sendActivityCard: (replyToMessageId: string, items: ToolItem[]) => Promise<string | null>;
+  updateActivityCard: (cardMessageId: string, items: ToolItem[]) => Promise<void>;
 }
 
 const AUTH_HINTS: Record<string, string> = {
@@ -136,8 +137,8 @@ export class SessionManager {
         this.opts.sendInterruptCard(messageId, params, requestId, chatId),
       sendThinkingCard: this.opts.sendThinkingCard,
       updateThinkingCard: this.opts.updateThinkingCard,
-      sendToolCard: this.opts.sendToolCard,
-      updateToolCard: this.opts.updateToolCard,
+      sendActivityCard: this.opts.sendActivityCard,
+      updateActivityCard: this.opts.updateActivityCard,
       log: (msg) => this.opts.log(`[${chatId}] ${msg}`),
     });
 
