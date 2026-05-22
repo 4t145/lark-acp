@@ -1,8 +1,8 @@
+import { createRequire } from "node:module";
 import pino from "pino";
 import type { Logger as PinoLogger, LoggerOptions } from "pino";
 
 const DEFAULT_LEVEL = "info";
-const PRODUCTION_NODE_ENV = "production";
 
 const DEV_TRANSPORT = {
   target: "pino-pretty",
@@ -12,6 +12,22 @@ const DEV_TRANSPORT = {
     ignore: "pid,hostname",
   },
 };
+
+// Pretty transport runs in a pino worker thread that resolves the target
+// against the consumer's `node_modules`. When `pino-pretty` isn't installed
+// (e.g. production install via `npx github:...`), pino crashes with
+// "unable to determine transport target". Probe for it once at module load
+// so we silently fall back to JSON output instead of blowing up.
+function isPinoPrettyAvailable(): boolean {
+  try {
+    createRequire(import.meta.url).resolve("pino-pretty");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const PRETTY_AVAILABLE = isPinoPrettyAvailable();
 
 /**
  * Variadic logger surface used by `@larksuiteoapi/node-sdk`. The SDK's
@@ -59,13 +75,9 @@ export interface LarkLogger {
   child(bindings: { name: string } & Record<string, unknown>): LarkLogger;
 }
 
-function isProduction(): boolean {
-  return process.env.NODE_ENV === PRODUCTION_NODE_ENV;
-}
-
 function buildOptions(level?: string): LoggerOptions {
   const resolved = level ?? process.env.LOG_LEVEL ?? DEFAULT_LEVEL;
-  if (isProduction()) {
+  if (!PRETTY_AVAILABLE) {
     return { level: resolved };
   }
   return { level: resolved, transport: DEV_TRANSPORT };
@@ -74,8 +86,8 @@ function buildOptions(level?: string): LoggerOptions {
 /**
  * Create a default pino-backed {@link LarkLogger}.
  *
- * - Development (NODE_ENV !== "production"): pretty-printed via pino-pretty.
- * - Production: structured JSON.
+ * - When `pino-pretty` is resolvable (dev install): pretty-printed.
+ * - Otherwise (production / `npx` install without devDeps): structured JSON.
  * - Level resolution: explicit arg → `LOG_LEVEL` env → `"info"`.
  */
 export function createPinoLogger(level?: string): LarkLogger {
