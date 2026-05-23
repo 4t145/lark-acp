@@ -1,6 +1,6 @@
 {
   "name": "@4t145/lark-acp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Bridge Feishu/Lark to any ACP-compatible AI agent",
   "type": "module",
   "files": [
@@ -24,7 +24,7 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/bin/lark-acp.js dist/bin/mock-agent.js",
     "prepare": "npm run build",
     "start": "node dist/bin/lark-acp.js",
     "dev": "tsc --watch",
