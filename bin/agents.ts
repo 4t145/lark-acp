@@ -75,8 +75,8 @@ export const BUILT_IN_AGENTS: Readonly<Record<string, AgentPreset>> = {
   },
   mock: {
     label: "Mock Agent",
-    command: "node",
-    args: ["./dist/bin/mock-agent.js"],
+    command: "lark-acp-mock",
+    args: [],
     description:
       "Built-in scripted ACP agent (思考 / 工具调用 / 权限许可 / Markdown)，用于本地端到端调试",
   },
